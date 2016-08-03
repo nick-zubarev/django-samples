@@ -1,0 +1,195 @@
+Example1
+
+class APISearchForm(forms.Form):
+    """
+    Search form for Api Search
+    """
+    duration_min = forms.IntegerField(required=False)
+    duration_max = forms.IntegerField(required=False)
+    duration = form_fields.IntegerListField(min_value=1, required=False)
+    month = form_fields.MonthListField(required=False)
+    destination = form_fields.IntegerListField(min_value=1, required=False)
+    price_min = forms.IntegerField(min_value=0, required=False)
+    price_max = forms.IntegerField(min_value=0, required=False)
+    has_price = form_fields.BooleanIntField(required=False)
+    country = form_fields.IntegerListField(min_value=1, required=False)
+
+class SearchMixin(object):
+
+    search_form = forms.APISearchForm
+    search_filters = None
+
+    def get_search_service(self, query_parameters, *args, **kwargs):
+        """
+        Returns Search Service instance
+        initialized with query parameters
+        """
+        search_form = self.search_form(query_parameters)
+        search_form.is_valid()
+        SearchMixin._raise_validation_error(search_form.errors)
+
+        self.search_filters = search_form.cleaned_data
+        return self.search_service(search_form.cleaned_data, *args, **kwargs)
+
+    @staticmethod
+    def _raise_validation_error(errors):
+        """
+        If errors raise exception with description
+        :param errors:
+        :return:
+        """
+        if errors:
+            error_messages = []
+            for error in errors:
+                error_messages.append('%s: %s' % (error, errors[error][0]))
+
+            raise exceptions.SearchFilterInvalid(detail=' '.join(error_messages))
+
+
+class BookingSearchViewSet(SearchMixin, OAuthCommonMixin, GenericViewSet):
+    """
+    Booking Search
+    """
+    permission_classes = (IsAuthenticatedOrTokenHasScope, )
+    serializer_class = BookingSearchSerializer
+
+    search_service = services.BookingSearchService
+    search_form = forms.BookingListFilterForm
+
+    def options(self, request, *args, **kwargs):
+        """
+        List of choices available for filtering
+        """
+        return BookingOptionsViewSet().list(request, *args, **kwargs)
+
+    def get_search_service(self, user, language, query_parameters, order_by):
+        search_form = self.search_form(query_parameters)
+        search_form.is_valid()
+        SearchMixin._raise_validation_error(search_form.errors)
+
+        self.search_filters = search_form.cleaned_data
+        return self.search_service(filters=search_form.cleaned_data, order_by=order_by, user=user, language=language)
+
+    def list(self, request, *args, **kwargs):
+        order_by = request.QUERY_PARAMS.get('ordering')
+        order_by = order_by.split(',') if order_by else None
+        language = get_language_from_request_querystring(request)
+        translation.activate(language)
+        search_service = self.get_search_service(request.user, language, request.QUERY_PARAMS, order_by)
+
+        search_result = search_service.search()
+        page = self.paginate_queryset(search_result)
+        serializer = self.get_pagination_serializer(page)
+        return Response(serializer.data)
+        
+
+class BookingSearchSerializer(MultiLangSerializerMixinForIndex, serializers.Serializer):
+    booking_id = serializers.CharField()
+    created_date = CurrentTimeZoneDateTimeField(source='booking_created_date')
+    payment_due = CurrentTimeZoneDateTimeField(source='booking_payment_due')
+    departure_date = CurrentTimeZoneDateField(source='booking_departure_date')
+    contact_info = serializers.CharField(source='booking_contact_info')
+    contact_name = serializers.CharField(source='contact_name')
+    contact_mobile = serializers.CharField(source='contact_mobile')
+    booking_status = serializers.SerializerMethodField('_get_booking_status_display')
+    product_name = serializers.CharField(source='booking_product_name')
+    booking_amount = serializers.SerializerMethodField('_get_amount')
+    status = serializers.CharField(source='booking_status')
+    cancel_url = serializers.SerializerMethodField('_get_cancel_url')
+    product_url = serializers.SerializerMethodField('_get_product_url')
+
+    def _get_product_url(self, booking):
+        product_url = None
+        booking = booking.object
+        if booking.is_package and booking.package:
+            package_id = booking.package.package_id
+            product_url = reverse_lazy('packages:package-detail', kwargs={'package_id': package_id})
+        elif booking.is_travel and booking.price and booking.price.sailing and booking.price.sailing.travel:
+            travel_pk = booking.price.travel.pk
+            travel_slug = booking.price.travel.slug
+            product_url = reverse_lazy('travel-detail', kwargs={'pk': travel_pk, 'slug': travel_slug})
+        return product_url
+
+    def _get_booking_status_display(self, booking):
+        return dict(settings.BOOKING_STATUS_CHOICES).get(booking.booking_status)
+
+    def _get_amount(self, booking):
+        return pricer.Price(booking.booking_amount).formatted(is_rounded=False) if booking.booking_amount else None
+
+    def _get_cancel_url(self, booking):
+        return reverse_lazy('booking-cancel', kwargs={'booking_id': booking.booking_id})
+
+
+      
+# urls
+router = DefaultRouter()
+router.register(r'bookings/search', views.BookingSearchViewSet, base_name='booking-search')
+
+
+
+
+
+Example2
+
+class PhotoListSerializer(serializers.ModelSerializer):
+    image_thumbnail = PhotoImageField(source='image_thumbnail', read_only=True)
+    tags = PhotoTag(source='tags', read_only=True)
+    owner = UserSerializer(source='owner', read_only=True)
+    approval_status = serializers.CharField(source='approval_status', read_only=True)
+    upload_date = serializers.DateTimeField(source='upload_date', read_only=True)
+    rights_managed = serializers.BooleanField(source='rights_managed', read_only=True)
+    royalty_free = serializers.BooleanField(source='royalty_free', read_only=True)
+    releases = ReleaseSerializer(many=True, source='releases', read_only=True)
+    photo_status = serializers.CharField(source='photo_status', read_only=True)
+
+    class Meta:
+        model = Photo
+        fields = (
+            'id',
+            'owner',
+            'title',
+            'image_thumbnail',
+            'requires_release',
+            'model_release_count',
+            'property_release_count',
+            'rights_managed',
+            'royalty_free',
+            'approval_status',
+            'tags',
+            'v_tags',
+            'releases',
+            'photo_status',
+        )
+
+class PersonalPhotoList(generics.ListAPIView):
+    model = Photo
+    paginate_by = 10
+    paginate_by_param = 'num'
+    serializer_class = PhotoListSerializer
+
+    # pagination_serializer_class = CustomPaginationSerializer
+    def get_queryset(self):
+        """
+        Limit the result set by owner id
+        """
+        queryset = Photo.objects.filter(owner=self.request.user).order_by('-id')
+        selected_filter = self.request.GET.get('filter')
+        statuses = [Photo.AWAITING_APPROVAL, Photo.APPROVED_CREATIVE,
+                    Photo.APPROVED_STREET]
+        if selected_filter == 'not_live':
+            queryset = queryset.filter(photo_status='QUEUE',
+                                       approval_status__in=statuses)
+        elif selected_filter == 'awaiting_release':
+            
+            queryset = queryset.filter(photo_status='QUEUE',
+                                       approval_status__in=statuses)
+            ids = [photo.pk for photo in queryset if not photo.releases_ok()]
+            queryset = queryset.filter(id__in=ids)
+        elif selected_filter == 'awaiting_metadata':
+            queryset = queryset.filter(photo_status='QUEUE',
+                                       approval_status__in=statuses)
+            ids = [photo.pk for photo in queryset if not photo.metadata_ok()]
+            queryset = queryset.filter(id__in=ids)
+        elif selected_filter == 'rejected':
+                queryset = queryset.filter(approval_status__in=Photo.REJECTED)
+        return queryset
